@@ -7,11 +7,12 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { spawn } from "child_process";
+import { randomBytes } from "crypto";
 import { z } from "zod";
 
 const NATS_URL = process.env.NATS_URL || "nats://localhost:4222";
 
-// Tool schemas
+// Tool schemas - Core NATS
 const PublishSchema = z.object({
   subject: z.string(),
   message: z.string(),
@@ -30,7 +31,40 @@ const RequestSchema = z.object({
   timeout: z.number().optional().default(5000),
 });
 
+// Tool schemas - Agent Protocol
+const AgentRegisterSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+});
+
+const AgentDeregisterSchema = z.object({
+  agent_id: z.string(),
+});
+
+const AgentBroadcastSchema = z.object({
+  agent_id: z.string(),
+  message: z.string(),
+  priority: z.enum(["low", "normal", "high"]).optional().default("normal"),
+});
+
+const AgentDMSchema = z.object({
+  agent_id: z.string(),
+  to: z.string(),
+  message: z.string(),
+});
+
+const AgentCheckMessagesSchema = z.object({
+  agent_id: z.string(),
+  timeout: z.number().optional().default(5000),
+});
+
+const AgentHeartbeatSchema = z.object({
+  agent_id: z.string(),
+  status: z.string().optional().default("active"),
+});
+
 const tools: Tool[] = [
+  // Core NATS tools
   {
     name: "nats_publish",
     description: "Publish a message to a NATS subject",
@@ -78,6 +112,80 @@ const tools: Tool[] = [
         timeout: { type: "number" as const, description: "Timeout in ms" },
       },
       required: ["subject", "message"],
+    },
+  },
+  // Agent Protocol tools
+  {
+    name: "nats_agent_register",
+    description: "Register as an agent. Returns unique agent_id to use in other calls.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: { type: "string" as const, description: "Agent name (e.g., 'clauder')" },
+        description: { type: "string" as const, description: "What this agent does" },
+      },
+      required: ["name", "description"],
+    },
+  },
+  {
+    name: "nats_agent_deregister",
+    description: "Deregister an agent when shutting down.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        agent_id: { type: "string" as const, description: "Your agent ID from registration" },
+      },
+      required: ["agent_id"],
+    },
+  },
+  {
+    name: "nats_agent_broadcast",
+    description: "Send a message to ALL agents.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        agent_id: { type: "string" as const, description: "Your agent ID" },
+        message: { type: "string" as const, description: "Message content" },
+        priority: { type: "string" as const, enum: ["low", "normal", "high"], description: "Message priority" },
+      },
+      required: ["agent_id", "message"],
+    },
+  },
+  {
+    name: "nats_agent_dm",
+    description: "Send a direct message to a specific agent.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        agent_id: { type: "string" as const, description: "Your agent ID" },
+        to: { type: "string" as const, description: "Target agent ID" },
+        message: { type: "string" as const, description: "Message content" },
+      },
+      required: ["agent_id", "to", "message"],
+    },
+  },
+  {
+    name: "nats_agent_check_messages",
+    description: "Check for incoming messages (broadcasts and DMs).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        agent_id: { type: "string" as const, description: "Your agent ID" },
+        timeout: { type: "number" as const, description: "How long to wait for messages (ms)" },
+      },
+      required: ["agent_id"],
+    },
+  },
+  {
+    name: "nats_agent_heartbeat",
+    description: "Send a heartbeat to indicate agent is still alive.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        agent_id: { type: "string" as const, description: "Your agent ID" },
+        status: { type: "string" as const, description: "Current status message" },
+      },
+      required: ["agent_id"],
     },
   },
 ];
@@ -152,6 +260,85 @@ async function natsRequest(args: z.infer<typeof RequestSchema>): Promise<string>
   return runNatsCommand(cmdArgs);
 }
 
+// Agent Protocol implementations
+function generateAgentId(name: string): string {
+  const suffix = randomBytes(4).toString("hex");
+  return `${name}-${suffix}`;
+}
+
+async function agentRegister(args: z.infer<typeof AgentRegisterSchema>): Promise<string> {
+  const agentId = generateAgentId(args.name);
+  const payload = JSON.stringify({
+    id: agentId,
+    name: args.name,
+    description: args.description,
+    ts: Date.now(),
+  });
+  await publish({ subject: "agents.register", message: payload });
+  return JSON.stringify({ agent_id: agentId, message: "Registered. Use this agent_id for all subsequent calls." });
+}
+
+async function agentDeregister(args: z.infer<typeof AgentDeregisterSchema>): Promise<string> {
+  const payload = JSON.stringify({ id: args.agent_id, ts: Date.now() });
+  await publish({ subject: "agents.deregister", message: payload });
+  return "Deregistered";
+}
+
+async function agentBroadcast(args: z.infer<typeof AgentBroadcastSchema>): Promise<string> {
+  const payload = JSON.stringify({
+    from: args.agent_id,
+    msg: args.message,
+    priority: args.priority || "normal",
+    ts: Date.now(),
+  });
+  await publish({ subject: "agents.broadcast", message: payload });
+  return "Broadcast sent";
+}
+
+async function agentDM(args: z.infer<typeof AgentDMSchema>): Promise<string> {
+  const payload = JSON.stringify({
+    from: args.agent_id,
+    to: args.to,
+    msg: args.message,
+    ts: Date.now(),
+  });
+  await publish({ subject: `agents.dm.${args.to}`, message: payload });
+  return `DM sent to ${args.to}`;
+}
+
+async function agentCheckMessages(args: z.infer<typeof AgentCheckMessagesSchema>): Promise<string> {
+  const timeout = args.timeout || 5000;
+  // Subscribe to both DMs and broadcasts
+  const dmSubject = `agents.dm.${args.agent_id}`;
+  const broadcastSubject = "agents.broadcast";
+
+  // Run two subscribes in parallel
+  const [dms, broadcasts] = await Promise.all([
+    subscribe({ subject: dmSubject, count: 10, timeout }),
+    subscribe({ subject: broadcastSubject, count: 10, timeout }),
+  ]);
+
+  const messages: string[] = [];
+  if (dms && dms !== "No messages" && dms !== "No messages received") {
+    messages.push(`[DMs]\n${dms}`);
+  }
+  if (broadcasts && broadcasts !== "No messages" && broadcasts !== "No messages received") {
+    messages.push(`[Broadcasts]\n${broadcasts}`);
+  }
+
+  return messages.length > 0 ? messages.join("\n\n") : "No messages";
+}
+
+async function agentHeartbeat(args: z.infer<typeof AgentHeartbeatSchema>): Promise<string> {
+  const payload = JSON.stringify({
+    id: args.agent_id,
+    status: args.status || "active",
+    ts: Date.now(),
+  });
+  await publish({ subject: `agents.heartbeat.${args.agent_id}`, message: payload });
+  return "Heartbeat sent";
+}
+
 const server = new Server(
   { name: "nats-mcp-server", version: "1.0.0" },
   { capabilities: { tools: {} } }
@@ -174,6 +361,24 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         break;
       case "nats_request":
         result = await natsRequest(RequestSchema.parse(args));
+        break;
+      case "nats_agent_register":
+        result = await agentRegister(AgentRegisterSchema.parse(args));
+        break;
+      case "nats_agent_deregister":
+        result = await agentDeregister(AgentDeregisterSchema.parse(args));
+        break;
+      case "nats_agent_broadcast":
+        result = await agentBroadcast(AgentBroadcastSchema.parse(args));
+        break;
+      case "nats_agent_dm":
+        result = await agentDM(AgentDMSchema.parse(args));
+        break;
+      case "nats_agent_check_messages":
+        result = await agentCheckMessages(AgentCheckMessagesSchema.parse(args));
+        break;
+      case "nats_agent_heartbeat":
+        result = await agentHeartbeat(AgentHeartbeatSchema.parse(args));
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);

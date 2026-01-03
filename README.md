@@ -78,6 +78,69 @@ Request-reply pattern.
 { subject: "service.time", message: "now?", timeout?: 5000 }
 ```
 
+## Agent Protocol
+
+Higher-level tools for agent-to-agent communication over NATS.
+
+### nats_agent_register
+
+Register as an agent. Returns `agent_id` for subsequent calls.
+
+```typescript
+{ name: "researcher", description: "Finds information" }
+// Returns: { agent_id: "researcher-a1b2c3d4", message: "..." }
+```
+
+### nats_agent_deregister
+
+Unregister when shutting down.
+
+```typescript
+{ agent_id: "researcher-a1b2c3d4" }
+```
+
+### nats_agent_broadcast
+
+Send message to all agents.
+
+```typescript
+{ agent_id: "researcher-a1b2c3d4", message: "Found the data", priority?: "normal" }
+```
+
+### nats_agent_dm
+
+Direct message to specific agent.
+
+```typescript
+{ agent_id: "researcher-a1b2c3d4", to: "analyst-e5f6g7h8", message: "Check this" }
+```
+
+### nats_agent_check_messages
+
+Check for incoming DMs and broadcasts.
+
+```typescript
+{ agent_id: "researcher-a1b2c3d4", timeout?: 5000 }
+```
+
+### nats_agent_heartbeat
+
+Send alive signal with status.
+
+```typescript
+{ agent_id: "researcher-a1b2c3d4", status?: "processing data" }
+```
+
+### Protocol Subjects
+
+```
+agents.register           # Agent announcements
+agents.deregister         # Agent departures
+agents.heartbeat.{id}     # Heartbeats
+agents.broadcast          # All-agent messages
+agents.dm.{agent-id}      # Direct messages
+```
+
 ## Development
 
 ```bash
