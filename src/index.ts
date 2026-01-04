@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // PROJECT: claude-automation
-// Agent communication via snd (no NATS)
+// Agent communication via snd
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -16,7 +16,7 @@ import { z } from "zod";
 
 const SND_PATH = process.env.SND_PATH || "/home/decoder/.claude/scripts/snd";
 
-// Tool schemas - Agent Protocol
+// Tool schemas
 const AgentRegisterSchema = z.object({
   name: z.string(),
   description: z.string(),
@@ -44,19 +44,19 @@ const AgentDiscoverSchema = z.object({
 
 const tools: Tool[] = [
   {
-    name: "nats_agent_register",
+    name: "agent_register",
     description: "Register as an agent. Returns unique agent_id to use in other calls.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        name: { type: "string" as const, description: "Agent name (e.g., 'clauder')" },
+        name: { type: "string" as const, description: "Agent name" },
         description: { type: "string" as const, description: "What this agent does" },
       },
       required: ["name", "description"],
     },
   },
   {
-    name: "nats_agent_deregister",
+    name: "agent_deregister",
     description: "Deregister an agent when shutting down.",
     inputSchema: {
       type: "object" as const,
@@ -67,8 +67,8 @@ const tools: Tool[] = [
     },
   },
   {
-    name: "nats_agent_broadcast",
-    description: "Send a message to ALL other agents via snd.",
+    name: "agent_broadcast",
+    description: "Send a message to ALL other agents.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -80,8 +80,8 @@ const tools: Tool[] = [
     },
   },
   {
-    name: "nats_agent_dm",
-    description: "Send a direct message to a specific agent via snd.",
+    name: "agent_dm",
+    description: "Send a direct message to a specific agent.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -93,8 +93,8 @@ const tools: Tool[] = [
     },
   },
   {
-    name: "nats_agent_discover",
-    description: "Discover all active agents. Returns list of registered agents with their IDs, names, and status.",
+    name: "agent_discover",
+    description: "Discover all active agents.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -113,7 +113,7 @@ interface AgentInfo {
 
 function getActiveAgents(includeStale = false): AgentInfo[] {
   const agentDir = "/tmp";
-  const staleThreshold = 5 * 60 * 1000; // 5 minutes
+  const staleThreshold = 5 * 60 * 1000;
   const now = Date.now();
   const agents: AgentInfo[] = [];
 
@@ -173,20 +173,16 @@ function generateAgentId(name: string): string {
 
 async function agentRegister(args: z.infer<typeof AgentRegisterSchema>): Promise<string> {
   const agentId = generateAgentId(args.name);
-  // Note: The actual file creation happens via PostToolUse hook (__mcp_agent_registration_hook.sh)
   return JSON.stringify({ agent_id: agentId, message: "Registered. Use this agent_id for all subsequent calls." });
 }
 
 async function agentDeregister(_args: z.infer<typeof AgentDeregisterSchema>): Promise<string> {
-  // Note: The actual file cleanup happens via PostToolUse hook
   return "Deregistered";
 }
 
 async function agentBroadcast(args: z.infer<typeof AgentBroadcastSchema>): Promise<string> {
   const agents = getActiveAgents();
-  const senderName = args.agent_id.split("-")[0]; // Extract name from agent_id
-
-  // Find all other agents (not the sender)
+  const senderName = args.agent_id.split("-")[0];
   const targets = agents.filter(a => a.id !== args.agent_id && a.tmux_pane);
 
   if (targets.length === 0) {
@@ -211,17 +207,10 @@ async function agentBroadcast(args: z.infer<typeof AgentBroadcastSchema>): Promi
 async function agentDM(args: z.infer<typeof AgentDMSchema>): Promise<string> {
   const agents = getActiveAgents();
   const senderName = args.agent_id.split("-")[0];
-
-  // Find target agent
   const target = agents.find(a => a.id === args.to);
 
-  if (!target) {
-    return `Agent ${args.to} not found`;
-  }
-
-  if (!target.tmux_pane) {
-    return `Agent ${args.to} has no tmux pane`;
-  }
+  if (!target) return `Agent ${args.to} not found`;
+  if (!target.tmux_pane) return `Agent ${args.to} has no tmux pane`;
 
   const formattedMsg = `[DM from ${senderName}] ${args.message}`;
 
@@ -236,9 +225,7 @@ async function agentDM(args: z.infer<typeof AgentDMSchema>): Promise<string> {
 async function agentDiscover(args: z.infer<typeof AgentDiscoverSchema>): Promise<string> {
   const agents = getActiveAgents(args.include_stale);
 
-  if (agents.length === 0) {
-    return "No agents currently registered.";
-  }
+  if (agents.length === 0) return "No agents currently registered.";
 
   const lines = agents.map(a =>
     `- ${a.name} (${a.id}): ${a.is_stale ? "stale" : "active"} | pane: ${a.tmux_pane || "unknown"}`
@@ -248,7 +235,7 @@ async function agentDiscover(args: z.infer<typeof AgentDiscoverSchema>): Promise
 }
 
 const server = new Server(
-  { name: "nats-mcp-server", version: "2.0.0" },
+  { name: "agents-mcp-server", version: "1.0.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -261,19 +248,19 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     let result: string;
 
     switch (name) {
-      case "nats_agent_register":
+      case "agent_register":
         result = await agentRegister(AgentRegisterSchema.parse(args));
         break;
-      case "nats_agent_deregister":
+      case "agent_deregister":
         result = await agentDeregister(AgentDeregisterSchema.parse(args));
         break;
-      case "nats_agent_broadcast":
+      case "agent_broadcast":
         result = await agentBroadcast(AgentBroadcastSchema.parse(args));
         break;
-      case "nats_agent_dm":
+      case "agent_dm":
         result = await agentDM(AgentDMSchema.parse(args));
         break;
-      case "nats_agent_discover":
+      case "agent_discover":
         result = await agentDiscover(AgentDiscoverSchema.parse(args));
         break;
       default:
@@ -290,7 +277,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Agent MCP Server running (snd-based, no NATS)");
+  console.error("Agents MCP Server running");
 }
 
 main().catch(console.error);

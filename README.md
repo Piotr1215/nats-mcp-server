@@ -1,34 +1,22 @@
-# NATS MCP Server
+# Agents MCP Server
 
-MCP server enabling AI assistants to interact with [NATS](https://nats.io/) messaging.
+MCP server for agent-to-agent communication via snd (tmux message injection).
 
 ## Prerequisites
 
 - Node.js >= 18
-- [NATS CLI](https://github.com/nats-io/natscli) in PATH
-
-```bash
-# Install NATS CLI
-curl -sf https://binaries.nats.dev/nats-io/natscli/nats@latest | sh
-sudo mv nats /usr/local/bin/
-
-# Or via package manager
-brew install nats-io/nats-tools/nats  # macOS
-go install github.com/nats-io/natscli/nats@latest  # Go
-```
+- `snd` script in PATH (from `~/.claude/scripts/snd`)
 
 ## Installation
 
 ```bash
-git clone https://github.com/Piotr1215/nats-mcp-server.git
-cd nats-mcp-server
+git clone https://github.com/Piotr1215/agents-mcp-server.git
+cd agents-mcp-server
 npm install
 npm run build
 ```
 
 ## Configuration
-
-Environment variable `NATS_URL` sets the server (default: `nats://localhost:4222`).
 
 ### Claude Code
 
@@ -37,52 +25,17 @@ Add to `~/.claude/claude.json`:
 ```json
 {
   "mcpServers": {
-    "nats": {
+    "agents": {
       "command": "node",
-      "args": ["/path/to/nats-mcp-server/build/index.js"],
-      "env": {
-        "NATS_URL": "nats://your-server:4222"
-      }
+      "args": ["/path/to/agents-mcp-server/build/index.js"]
     }
   }
 }
 ```
 
-### Claude Desktop
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (same format).
-
 ## Tools
 
-### nats_publish
-
-Publish message to a subject.
-
-```typescript
-{ subject: "orders.new", message: "order data", headers?: [{key: "id", value: "123"}] }
-```
-
-### nats_subscribe
-
-Receive messages from a subject.
-
-```typescript
-{ subject: "events.>", count?: 1, timeout?: 5000 }
-```
-
-### nats_request
-
-Request-reply pattern.
-
-```typescript
-{ subject: "service.time", message: "now?", timeout?: 5000 }
-```
-
-## Agent Protocol
-
-Higher-level tools for agent-to-agent communication over NATS.
-
-### nats_agent_register
+### agent_register
 
 Register as an agent. Returns `agent_id` for subsequent calls.
 
@@ -91,7 +44,7 @@ Register as an agent. Returns `agent_id` for subsequent calls.
 // Returns: { agent_id: "researcher-a1b2c3d4", message: "..." }
 ```
 
-### nats_agent_deregister
+### agent_deregister
 
 Unregister when shutting down.
 
@@ -99,47 +52,36 @@ Unregister when shutting down.
 { agent_id: "researcher-a1b2c3d4" }
 ```
 
-### nats_agent_broadcast
+### agent_broadcast
 
-Send message to all agents.
+Send message to all other agents via snd.
 
 ```typescript
 { agent_id: "researcher-a1b2c3d4", message: "Found the data", priority?: "normal" }
 ```
 
-### nats_agent_dm
+### agent_dm
 
-Direct message to specific agent.
+Direct message to specific agent via snd.
 
 ```typescript
 { agent_id: "researcher-a1b2c3d4", to: "analyst-e5f6g7h8", message: "Check this" }
 ```
 
-### nats_agent_check_messages
+### agent_discover
 
-Check for incoming DMs and broadcasts.
-
-```typescript
-{ agent_id: "researcher-a1b2c3d4", timeout?: 5000 }
-```
-
-### nats_agent_heartbeat
-
-Send alive signal with status.
+List all active agents.
 
 ```typescript
-{ agent_id: "researcher-a1b2c3d4", status?: "processing data" }
+{ include_stale?: false }
 ```
 
-### Protocol Subjects
+## How It Works
 
-```
-agents.register           # Agent announcements
-agents.deregister         # Agent departures
-agents.heartbeat.{id}     # Heartbeats
-agents.broadcast          # All-agent messages
-agents.dm.{agent-id}      # Direct messages
-```
+1. Agents register via `agent_register` - creates tracking file in `/tmp/claude_agent_*.json`
+2. Broadcasts/DMs read agent files to find tmux panes
+3. Messages sent directly via `snd --pane <target> <message>`
+4. No message queue - messages arrive immediately in target tmux pane
 
 ## Development
 
