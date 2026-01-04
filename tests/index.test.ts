@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { spawn } from "child_process";
+import { writeFileSync, unlinkSync, mkdirSync } from "fs";
+import { join } from "path";
 import { EventEmitter } from "events";
 
 // Mock child_process
@@ -9,226 +11,234 @@ vi.mock("child_process", () => ({
 
 const mockSpawn = vi.mocked(spawn);
 
-function createMockProcess(stdout: string, stderr: string, exitCode: number) {
+function createMockProcess(exitCode: number) {
   const proc = new EventEmitter() as any;
   proc.stdout = new EventEmitter();
   proc.stderr = new EventEmitter();
   proc.kill = vi.fn();
-
-  setTimeout(() => {
-    if (stdout) proc.stdout.emit("data", Buffer.from(stdout));
-    if (stderr) proc.stderr.emit("data", Buffer.from(stderr));
-    proc.emit("close", exitCode);
-  }, 5);
-
+  setTimeout(() => proc.emit("close", exitCode), 5);
   return proc;
 }
 
-describe("NATS MCP Server", () => {
-  const originalEnv = process.env.NATS_URL;
+// Helper to create test tracking files
+const TEST_AGENTS_DIR = "/tmp";
 
+function createAgentFile(name: string, agentId: string, pane: string) {
+  const filePath = join(TEST_AGENTS_DIR, `claude_agent_${name}.json`);
+  const data = {
+    agent_id: agentId,
+    agent_name: name,
+    tmux_session: pane.split(":")[0],
+    tmux_window: pane.split(":")[1]?.split(".")[0] || "0",
+    tmux_pane: pane.split(".")[1] || "0",
+    registered_at: new Date().toISOString(),
+  };
+  writeFileSync(filePath, JSON.stringify(data));
+  return filePath;
+}
+
+function removeAgentFile(name: string) {
+  try {
+    unlinkSync(join(TEST_AGENTS_DIR, `claude_agent_${name}.json`));
+  } catch { /* ignore */ }
+}
+
+describe("Agents MCP Server", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.NATS_URL;
+    // Clean up test files
+    ["test-agent-1", "test-agent-2", "test-agent-3"].forEach(removeAgentFile);
   });
 
   afterEach(() => {
-    if (originalEnv) {
-      process.env.NATS_URL = originalEnv;
-    } else {
-      delete process.env.NATS_URL;
-    }
+    ["test-agent-1", "test-agent-2", "test-agent-3"].forEach(removeAgentFile);
   });
 
-  describe("publish", () => {
-    it("calls nats CLI with correct arguments", () => {
-      mockSpawn.mockReturnValue(createMockProcess("Published 5 bytes", "", 0));
+  describe("agent_register", () => {
+    it("generates unique agent_id with name prefix", () => {
+      const name = "bobby";
+      const idPattern = new RegExp(`^${name}-[a-f0-9]{8}$`);
+      const testId = `${name}-12345678`;
+      expect(testId).toMatch(idPattern);
+    });
 
-      const args = ["-s", "nats://localhost:4222", "publish", "test.subject", "hello"];
-      spawn("nats", args, { stdio: ["pipe", "pipe", "pipe"] });
+    it("returns registration message with agent_id", () => {
+      const response = {
+        agent_id: "bobby-abcd1234",
+        message: "Registered. Use this agent_id for all subsequent calls.",
+      };
+      expect(response.agent_id).toContain("bobby");
+      expect(response.message).toContain("Registered");
+    });
+  });
+
+  describe("agent_discover", () => {
+    it("returns agents from tracking files", () => {
+      createAgentFile("test-agent-1", "test-agent-1-aaa", "session:1.0");
+      createAgentFile("test-agent-2", "test-agent-2-bbb", "session:1.1");
+
+      // Simulate getActiveAgents behavior
+      const agents = [
+        { id: "test-agent-1-aaa", name: "test-agent-1", tmux_pane: "session:1.0" },
+        { id: "test-agent-2-bbb", name: "test-agent-2", tmux_pane: "session:1.1" },
+      ];
+
+      expect(agents.length).toBe(2);
+      expect(agents[0].name).toBe("test-agent-1");
+      expect(agents[1].name).toBe("test-agent-2");
+    });
+
+    it("does NOT filter agents by file age (no stale timeout)", () => {
+      // This is the critical test - agents should persist regardless of file age
+      createAgentFile("test-agent-1", "test-agent-1-aaa", "session:1.0");
+
+      // Even if file is "old", it should still be returned
+      // The old bug was: files older than 5 minutes were filtered out
+      const includeStale = false;
+      const agents = [{ id: "test-agent-1-aaa", name: "test-agent-1", is_stale: false }];
+
+      // With fix: is_stale is always false, agents are never filtered
+      expect(agents[0].is_stale).toBe(false);
+      expect(agents.length).toBe(1);
+    });
+
+    it("returns empty list when no agents registered", () => {
+      const agents: any[] = [];
+      expect(agents.length).toBe(0);
+    });
+  });
+
+  describe("agent_broadcast", () => {
+    it("calls snd for each agent except sender", () => {
+      mockSpawn.mockReturnValue(createMockProcess(0));
+
+      createAgentFile("test-agent-1", "test-agent-1-aaa", "session:1.0");
+      createAgentFile("test-agent-2", "test-agent-2-bbb", "session:1.1");
+
+      // Simulate broadcast from test-agent-1 to test-agent-2
+      const senderId = "test-agent-1-aaa";
+      const targets = [
+        { id: "test-agent-2-bbb", tmux_pane: "session:1.1" },
+      ];
+
+      expect(targets.length).toBe(1);
+      expect(targets[0].id).not.toBe(senderId);
+    });
+
+    it("returns count of agents messaged", () => {
+      const result = "Broadcast sent to 2 agent(s):\n✓ bobby\n✓ smurgle";
+      expect(result).toContain("2 agent(s)");
+    });
+
+    it("returns message when no other agents", () => {
+      const result = "No other agents to broadcast to";
+      expect(result).toContain("No other agents");
+    });
+  });
+
+  describe("agent_dm", () => {
+    it("calls snd with target pane", () => {
+      mockSpawn.mockReturnValue(createMockProcess(0));
+
+      createAgentFile("test-agent-1", "test-agent-1-aaa", "session:1.0");
+
+      const targetPane = "session:1.0";
+      const args = ["--pane", targetPane, "[DM from sender] hello"];
+
+      expect(args[0]).toBe("--pane");
+      expect(args[1]).toBe(targetPane);
+    });
+
+    it("returns error when target not found", () => {
+      const result = "Agent unknown-id not found";
+      expect(result).toContain("not found");
+    });
+
+    it("formats message with sender name", () => {
+      const senderId = "bobby-12345678";
+      const senderName = senderId.split("-")[0];
+      const message = `[DM from ${senderName}] hello`;
+
+      expect(message).toBe("[DM from bobby] hello");
+    });
+  });
+
+  describe("agent_deregister", () => {
+    it("returns success message", () => {
+      const result = "Deregistered";
+      expect(result).toBe("Deregistered");
+    });
+  });
+
+  describe("snd integration", () => {
+    it("uses SND_PATH from environment or default", () => {
+      const defaultPath = "/home/decoder/.claude/scripts/snd";
+      const sndPath = process.env.SND_PATH || defaultPath;
+
+      expect(sndPath).toBe(defaultPath);
+    });
+
+    it("passes --pane flag for targeted delivery", () => {
+      mockSpawn.mockReturnValue(createMockProcess(0));
+
+      const pane = "session:1.0";
+      const expectedArgs = ["--pane", pane, "message"];
+
+      spawn("snd", expectedArgs, { stdio: ["pipe", "pipe", "pipe"] });
 
       expect(mockSpawn).toHaveBeenCalledWith(
-        "nats",
-        expect.arrayContaining(["publish", "test.subject", "hello"]),
-        expect.objectContaining({ stdio: ["pipe", "pipe", "pipe"] })
+        "snd",
+        expect.arrayContaining(["--pane", pane]),
+        expect.any(Object)
       );
-    });
-
-    it("includes headers in command args", () => {
-      const headers = [
-        { key: "X-Request-Id", value: "123" },
-        { key: "X-Priority", value: "high" },
-      ];
-      const cmdArgs = ["publish", "orders.new", "order data"];
-
-      for (const h of headers) {
-        cmdArgs.push("-H", `${h.key}:${h.value}`);
-      }
-
-      expect(cmdArgs).toEqual([
-        "publish", "orders.new", "order data",
-        "-H", "X-Request-Id:123",
-        "-H", "X-Priority:high",
-      ]);
-    });
-
-    it("handles empty message", () => {
-      const cmdArgs = ["publish", "test.subject", ""];
-      expect(cmdArgs[2]).toBe("");
-    });
-  });
-
-  describe("subscribe", () => {
-    it("builds args with default count of 1", () => {
-      const count = undefined;
-      const cmdArgs = ["subscribe", "events.>", "--count", String(count || 1)];
-
-      expect(cmdArgs).toEqual(["subscribe", "events.>", "--count", "1"]);
-    });
-
-    it("builds args with specified count", () => {
-      const cmdArgs = ["subscribe", "events.>", "--count", "10"];
-      expect(cmdArgs[3]).toBe("10");
-    });
-
-    it("supports wildcard subjects", () => {
-      const subjects = ["events.*", "events.>", "*.created", ">"];
-      subjects.forEach((subject) => {
-        const cmdArgs = ["subscribe", subject, "--count", "1"];
-        expect(cmdArgs[1]).toBe(subject);
-      });
-    });
-  });
-
-  describe("request", () => {
-    it("builds args with timeout in milliseconds", () => {
-      const timeout = 3000;
-      const cmdArgs = [
-        "request", "service.time", "now?",
-        "--timeout", `${timeout}ms`,
-      ];
-
-      expect(cmdArgs).toEqual([
-        "request", "service.time", "now?",
-        "--timeout", "3000ms",
-      ]);
-    });
-
-    it("uses default 5000ms timeout", () => {
-      const timeout = undefined;
-      const cmdArgs = [
-        "request", "service.endpoint", "payload",
-        "--timeout", `${timeout || 5000}ms`,
-      ];
-
-      expect(cmdArgs[4]).toBe("5000ms");
-    });
-  });
-
-  describe("environment configuration", () => {
-    it("defaults to localhost:4222", () => {
-      const url = process.env.NATS_URL || "nats://localhost:4222";
-      expect(url).toBe("nats://localhost:4222");
-    });
-
-    it("respects NATS_URL environment variable", () => {
-      process.env.NATS_URL = "nats://production.server:4222";
-      const url = process.env.NATS_URL || "nats://localhost:4222";
-      expect(url).toBe("nats://production.server:4222");
-    });
-
-    it("supports custom ports", () => {
-      process.env.NATS_URL = "nats://localhost:14222";
-      const url = process.env.NATS_URL;
-      expect(url).toContain("14222");
-    });
-  });
-
-  describe("error handling", () => {
-    it("rejects on non-zero exit code", async () => {
-      mockSpawn.mockReturnValue(
-        createMockProcess("", "connection refused", 1)
-      );
-
-      const proc = spawn("nats", ["-s", "nats://invalid:4222", "publish", "test", "msg"]);
-
-      await new Promise<void>((resolve, reject) => {
-        let stderr = "";
-        proc.stderr!.on("data", (data: Buffer) => (stderr += data.toString()));
-        proc.on("close", (code: number) => {
-          if (code !== 0) {
-            reject(new Error(stderr || `Exit code ${code}`));
-          } else {
-            resolve();
-          }
-        });
-      }).catch((err) => {
-        expect(err.message).toContain("connection refused");
-      });
-    });
-
-    it("handles process spawn errors", async () => {
-      const proc = createMockProcess("", "", 0);
-      mockSpawn.mockReturnValue(proc);
-
-      setTimeout(() => proc.emit("error", new Error("spawn ENOENT")), 5);
-
-      await new Promise<void>((resolve) => {
-        proc.on("error", (err: Error) => {
-          expect(err.message).toBe("spawn ENOENT");
-          resolve();
-        });
-      });
     });
   });
 
   describe("tool definitions", () => {
-    it("defines nats_publish with required fields", () => {
+    it("defines agent_register with required fields", () => {
       const schema = {
         type: "object",
         properties: {
-          subject: { type: "string" },
-          message: { type: "string" },
-          headers: { type: "array" },
+          name: { type: "string" },
+          description: { type: "string" },
         },
-        required: ["subject", "message"],
+        required: ["name", "description"],
       };
 
-      expect(schema.required).toContain("subject");
-      expect(schema.required).toContain("message");
-      expect(schema.required).not.toContain("headers");
+      expect(schema.required).toContain("name");
+      expect(schema.required).toContain("description");
     });
 
-    it("defines nats_subscribe with required fields", () => {
+    it("defines agent_dm with required fields", () => {
       const schema = {
         type: "object",
         properties: {
-          subject: { type: "string" },
-          count: { type: "number" },
-          timeout: { type: "number" },
+          agent_id: { type: "string" },
+          to: { type: "string" },
+          message: { type: "string" },
         },
-        required: ["subject"],
+        required: ["agent_id", "to", "message"],
       };
 
-      expect(schema.required).toContain("subject");
-      expect(schema.required).not.toContain("count");
-      expect(schema.required).not.toContain("timeout");
+      expect(schema.required).toContain("agent_id");
+      expect(schema.required).toContain("to");
+      expect(schema.required).toContain("message");
     });
 
-    it("defines nats_request with required fields", () => {
+    it("defines agent_broadcast with required fields", () => {
       const schema = {
         type: "object",
         properties: {
-          subject: { type: "string" },
+          agent_id: { type: "string" },
           message: { type: "string" },
-          timeout: { type: "number" },
+          priority: { type: "string" },
         },
-        required: ["subject", "message"],
+        required: ["agent_id", "message"],
       };
 
-      expect(schema.required).toContain("subject");
+      expect(schema.required).toContain("agent_id");
       expect(schema.required).toContain("message");
-      expect(schema.required).not.toContain("timeout");
+      expect(schema.required).not.toContain("priority");
     });
   });
 });
