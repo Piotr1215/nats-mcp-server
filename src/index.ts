@@ -10,7 +10,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { spawn } from "child_process";
 import { randomBytes } from "crypto";
-import { readdirSync, readFileSync, statSync } from "fs";
+import { readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
 
@@ -111,10 +111,8 @@ interface AgentInfo {
   is_stale: boolean;
 }
 
-function getActiveAgents(includeStale = false): AgentInfo[] {
+function getActiveAgents(_includeStale = false): AgentInfo[] {
   const agentDir = "/tmp";
-  const staleThreshold = 5 * 60 * 1000;
-  const now = Date.now();
   const agents: AgentInfo[] = [];
 
   try {
@@ -123,14 +121,8 @@ function getActiveAgents(includeStale = false): AgentInfo[] {
     for (const file of files) {
       try {
         const filePath = join(agentDir, file);
-        const stat = statSync(filePath);
         const content = readFileSync(filePath, "utf-8");
         const data = JSON.parse(content);
-
-        const fileAge = now - stat.mtimeMs;
-        const isStale = fileAge > staleThreshold;
-
-        if (!includeStale && isStale) continue;
 
         agents.push({
           id: data.agent_id || "unknown",
@@ -138,7 +130,7 @@ function getActiveAgents(includeStale = false): AgentInfo[] {
           tmux_pane: data.tmux_session && data.tmux_window && data.tmux_pane
             ? `${data.tmux_session}:${data.tmux_window}.${data.tmux_pane}`
             : "",
-          is_stale: isStale,
+          is_stale: false,
         });
       } catch {
         // Skip invalid files
