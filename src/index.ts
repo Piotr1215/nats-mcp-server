@@ -127,9 +127,7 @@ function getActiveAgents(_includeStale = false): AgentInfo[] {
         agents.push({
           id: data.agent_id || "unknown",
           name: data.agent_name || "unknown",
-          tmux_pane: data.tmux_session && data.tmux_window && data.tmux_pane
-            ? `${data.tmux_session}:${data.tmux_window}.${data.tmux_pane}`
-            : "",
+          tmux_pane: data.pane_id || "",
           is_stale: false,
         });
       } catch {
