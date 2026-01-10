@@ -62,10 +62,11 @@ Send message to all other agents via snd.
 
 ### agent_dm
 
-Direct message to specific agent via snd.
+Direct message to specific agent via snd. Supports short ID resolution.
 
 ```typescript
-{ agent_id: "researcher-a1b2c3d4", to: "analyst-e5f6g7h8", message: "Check this" }
+{ agent_id: "researcher-a1b2c3d4", to: "analyst", message: "Check this" }
+// 'to' accepts full ID (analyst-e5f6g7h8) or just the name (analyst)
 ```
 
 ### agent_discover
@@ -73,15 +74,67 @@ Direct message to specific agent via snd.
 List all active agents.
 
 ```typescript
-{ include_stale?: false }
+{ include_stale?: false, group?: "research" }
+```
+
+### agent_groups
+
+List all agent groups with counts.
+
+```typescript
+{}
+// Returns: [{ group_name: "default", count: 2 }, { group_name: "research", count: 1 }]
+```
+
+### channel_send
+
+Send a message to a channel.
+
+```typescript
+{ agent_id: "researcher-a1b2c3d4", channel: "general", message: "Update: task complete" }
+```
+
+### channel_history
+
+Get recent messages from a channel.
+
+```typescript
+{ channel: "general", limit?: 50 }
+```
+
+### channel_list
+
+List all channels with message counts.
+
+```typescript
+{}
+// Returns: [{ channel: "general", message_count: 10 }, ...]
+```
+
+### dm_history
+
+Get DM history with another agent. Supports short ID resolution.
+
+```typescript
+{ agent_id: "researcher-a1b2c3d4", with_agent: "analyst", limit?: 50 }
+// with_agent accepts full ID or just the name
+```
+
+### messages_since
+
+Poll for new messages since a given ID (for TUI).
+
+```typescript
+{ since_id?: 0, limit?: 100 }
 ```
 
 ## How It Works
 
-1. Agents register via `agent_register` - creates tracking file in `/tmp/claude_agent_*.json`
-2. Broadcasts/DMs read agent files to find tmux panes
-3. Messages sent directly via `snd --pane <target> <message>`
-4. No message queue - messages arrive immediately in target tmux pane
+1. Agents register via `agent_register` - stored in DuckDB (`~/.claude/data/agents.duckdb`)
+2. Broadcasts/DMs query database to find tmux panes
+3. Messages sent via `snd --pane <target> <message>` and logged to DB
+4. Channel and DM history persisted for later retrieval
+5. Short ID resolution: use agent names instead of full IDs for convenience
 
 ## Development
 

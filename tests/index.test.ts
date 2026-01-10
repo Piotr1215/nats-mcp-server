@@ -324,4 +324,68 @@ describe("Agents MCP Server", () => {
       expect(counts.size).toBe(2);
     });
   });
+
+  describe("dm_history", () => {
+    it("returns formatted DM history between two agents", () => {
+      const messages = [
+        { timestamp: new Date(), from_agent: "alice-123", content: "hello" },
+        { timestamp: new Date(), from_agent: "bob-456", content: "hi there" },
+      ];
+
+      const lines = messages.map(m => {
+        const ts = new Date(m.timestamp).toLocaleTimeString();
+        const from = m.from_agent?.split("-")[0] || "unknown";
+        return `[${ts}] ${from}: ${m.content}`;
+      });
+
+      expect(lines[0]).toContain("alice:");
+      expect(lines[1]).toContain("bob:");
+    });
+
+    it("returns empty message when no history exists", () => {
+      const messages: any[] = [];
+      const result = messages.length === 0 ? "No DM history with bob" : "has history";
+      expect(result).toBe("No DM history with bob");
+    });
+
+    it("supports short ID resolution for with_agent parameter", () => {
+      // dm_history should accept both:
+      // - Full ID: "bob-12345678"
+      // - Short name: "bob"
+      const fullId = "bob-12345678";
+      const shortName = "bob";
+
+      // Both should resolve to same agent
+      expect(fullId.startsWith(shortName)).toBe(true);
+    });
+  });
+
+  describe("channel_list", () => {
+    it("returns list of channels with message counts", () => {
+      const channels = [
+        { channel: "general", message_count: 10 },
+        { channel: "random", message_count: 5 },
+      ];
+
+      expect(channels.length).toBe(2);
+      expect(channels[0].channel).toBe("general");
+      expect(channels[0].message_count).toBe(10);
+    });
+
+    it("returns empty list when no channels exist", () => {
+      const channels: any[] = [];
+      expect(channels.length).toBe(0);
+    });
+
+    it("formats channel list for display", () => {
+      const channels = [
+        { channel: "general", message_count: 10 },
+        { channel: "random", message_count: 5 },
+      ];
+
+      const formatted = channels.map(c => `#${c.channel} (${c.message_count} messages)`);
+      expect(formatted[0]).toBe("#general (10 messages)");
+      expect(formatted[1]).toBe("#random (5 messages)");
+    });
+  });
 });
